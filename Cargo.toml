@@ -2,6 +2,7 @@
 name = "mgba"
 version = "4.0.32"
 edition = "2021"
+license = "MPL-2.0"
 
 [dependencies]
 log = "0.4"
@@ -11,3 +12,14 @@ thiserror = "1"
 
 [lints]
 workspace = true
+
+[workspace]
+
+[workspace.lints.clippy]
+new_without_default = "allow"
+type_complexity = "allow"
+identity_op = "allow"
+blocks_in_conditions = "allow"
+redundant_closure = "allow"
+too_many_arguments = "allow"
+needless_lifetimes = "allow"
