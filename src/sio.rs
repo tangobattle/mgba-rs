@@ -158,30 +158,65 @@ impl Driver {
     /// Serialize this player's lockstep state (for player 0, this includes
     /// the shared coordinator state). Core savestates do NOT cover any of
     /// this; snapshot both alongside each core's state.
+    ///
+    /// The blob also carries the pieces of plain GBASIO state that core
+    /// savestates get wrong (see `load_state`), so "core state + this
+    /// blob" is the complete rollback unit for one linked core.
     pub fn save_state(&mut self) -> Vec<u8> {
         let mut buf: *mut std::os::raw::c_void = std::ptr::null_mut();
         let mut size: usize = 0;
         unsafe {
             (self.raw.d.saveState.unwrap())(&mut self.raw.d, &mut buf, &mut size);
-            let v = std::slice::from_raw_parts(buf as *const u8, size).to_vec();
+            let mut v = std::slice::from_raw_parts(buf as *const u8, size).to_vec();
             mgba_sys::free(buf);
+            // GBAIOSerialize never stores SIOMLT_SEND (it's flagged neither
+            // valid nor special), so a restored core would keep the
+            // pre-rollback value. Carry it ourselves.
+            let gba = (*self.raw.d.p).p;
+            v.extend_from_slice(&(*gba).memory.io[REG_SIOMLT_SEND].to_le_bytes());
             v
         }
     }
 
     /// Restore this player's lockstep state. Call after the owning core's
     /// `load_state`.
+    ///
+    /// Also repairs what the core load leaves inconsistent: GBAIODeserialize
+    /// raw-copies SIOCNT/RCNT into the io block (both are W-special) but
+    /// never resyncs the `GBASIO::siocnt`/`rcnt` shadow registers that
+    /// reads are served from, nor the mode derived from them — after a
+    /// vanilla core load they still hold pre-rollback values.
     pub fn load_state(&mut self, state: &[u8]) -> bool {
+        if state.len() < 2 {
+            return false;
+        }
+        let (c_state, extra) = state.split_at(state.len() - 2);
         unsafe {
-            // The core load cleared the timing list; make sure our event
-            // isn't considered scheduled twice if a caller restores a driver
-            // blob without a core load in between.
             let sio = self.raw.d.p;
             if !sio.is_null() {
                 let gba = (*sio).p;
+                let io = &mut (*gba).memory.io;
+                io[REG_SIOMLT_SEND] = u16::from_le_bytes(extra.try_into().unwrap());
+                (*sio).siocnt = io[REG_SIOCNT];
+                (*sio).rcnt = io[REG_RCNT];
+                // Mode derivation per sio.c's _switchMode, minus the driver
+                // setMode callback: the lockstep blob loaded below is the
+                // authority on the player's mode and event queue, and firing
+                // events out of restore would corrupt it.
+                let mode = ((((*sio).rcnt & 0xc000) | ((*sio).siocnt & 0x3000)) >> 12) as u32;
+                let mode = if mode < 8 { mode & 0x3 } else { mode & 0xc };
+                (*sio).mode = mode as mgba_sys::GBASIOMode;
+                // The core load cleared the timing list; make sure our event
+                // isn't considered scheduled twice if a caller restores a
+                // driver blob without a core load in between.
                 mgba_sys::mTimingDeschedule(&mut (*gba).timing, &mut self.raw.event);
             }
-            (self.raw.d.loadState.unwrap())(&mut self.raw.d, state.as_ptr() as *const _, state.len())
+            (self.raw.d.loadState.unwrap())(&mut self.raw.d, c_state.as_ptr() as *const _, c_state.len())
         }
     }
 }
+
+// GBA io block indices (register address >> 1).
+const REG_SIOCNT: usize = 0x128 >> 1;
+const REG_RCNT: usize = 0x134 >> 1;
+const REG_SIOMLT_SEND: usize = 0x12a >> 1;
