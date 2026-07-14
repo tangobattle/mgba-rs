@@ -4,6 +4,7 @@ pub mod core;
 pub mod gba;
 pub mod input;
 pub mod log;
+pub mod sio;
 pub mod state;
 pub mod sync;
 pub mod thread;

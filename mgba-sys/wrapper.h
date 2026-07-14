@@ -6,6 +6,9 @@
 #include <mgba/core/log.h>
 #include <mgba/core/sync.h>
 #include <mgba/core/thread.h>
+#include <mgba/core/lockstep.h>
 #include <mgba/gba/core.h>
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/serialize.h>
+#include <mgba/internal/gba/sio/lockstep.h>
+#include <stdlib.h>
