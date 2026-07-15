@@ -116,7 +116,21 @@ impl Core {
         self.video_buffer.as_deref()
     }
 
+    /// Install instruction traps: each `(address, handler)` patches a
+    /// Thumb BKPT over the instruction at `address` and calls `handler`
+    /// (after running the displaced instruction) whenever it executes.
+    ///
+    /// This is deliberately the only way to install traps. The trapper is
+    /// spliced into the CPU's component table, which the core dereferences
+    /// right up through its own deinit, so it must live exactly as long as
+    /// the core — owning it here makes that structural (`Core`'s drop runs
+    /// deinit before fields drop).
+    ///
+    /// Panics if traps are already installed: there is no uninstall, so a
+    /// replacement would leave the first set's ROM patches live with their
+    /// handlers gone, and chain the bkpt16 hook into itself.
     pub fn set_traps(&mut self, traps: Vec<(u32, Box<dyn Fn(CoreMutRef)>)>) {
+        assert!(self.trapper.is_none(), "traps are already installed on this core");
         self.trapper = Some(trapper::Trapper::new(self.as_mut(), traps));
     }
 }
