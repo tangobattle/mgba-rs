@@ -77,13 +77,81 @@ fn extract_from_vcxproj(path: &Path) -> Option<Vec<String>> {
 /// across the FFI boundary and the video buffer is silently misinterpreted.
 const FORCED_DEFINES: &[&str] = &["COLOR_16_BIT"];
 
+/// Locate the wasi-sdk root: `WASI_SDK_PATH`, required for wasm32 builds.
+fn wasi_sdk() -> PathBuf {
+    PathBuf::from(
+        env::var("WASI_SDK_PATH").expect("set WASI_SDK_PATH to a wasi-sdk root to build mgba for wasm32"),
+    )
+}
+
+/// wasi-sdk's compiler-rt builtins archive for wasm32 — the layout moved
+/// across sdk releases, so glob for it instead of hardcoding a clang
+/// version.
+fn wasm32_builtins_dir(wasi_sdk: &Path) -> Option<PathBuf> {
+    let clang_lib = wasi_sdk.join("lib").join("clang");
+    for version in std::fs::read_dir(clang_lib).ok()? {
+        let lib = version.ok()?.path().join("lib");
+        for flavor in std::fs::read_dir(lib).ok()? {
+            let dir = flavor.ok()?.path();
+            if dir.join("libclang_rt.builtins-wasm32.a").exists() {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let wasm = target_arch == "wasm32";
 
     let mut cfg = cmake::Config::new("mgba");
     cfg.define("LIBMGBA_ONLY", "on");
     for def in FORCED_DEFINES {
         cfg.cflag(format!("-D{def}"));
+    }
+    if wasm {
+        let sdk = wasi_sdk();
+        // The toolchain file owns compiler/sysroot/system-name; keep the
+        // cmake crate's host-derived compiler flags out of the build.
+        cfg.define(
+            "CMAKE_TOOLCHAIN_FILE",
+            sdk.join("share").join("cmake").join("wasi-sdk.cmake"),
+        );
+        cfg.no_default_flags(true);
+        // Neither the WIN32 nor the UNIX branch of mgba's CMakeLists
+        // fires under CMAKE_SYSTEM_NAME=WASI, so pthreads/vfs-fd never
+        // turn on; these are belt and suspenders.
+        cfg.define("USE_PTHREADS", "OFF");
+        cfg.cflag("-DDISABLE_THREADING");
+        // Drop assert() so the core doesn't pull fprintf/abort paths
+        // beyond what the shim covers.
+        cfg.cflag("-DNDEBUG");
+        // The UNIX branch normally supplies _GNU_SOURCE; without it
+        // wasi-libc's headers hide the BSD/GNU declarations mgba's
+        // feature checks find in the library (strlcpy et al).
+        cfg.cflag("-D_GNU_SOURCE");
+        // wasi-libc deliberately leaves PATH_MAX undefined (WASI paths
+        // have no fixed bound); mgba only uses it for config-dir string
+        // buffers that are dead code under the in-memory VFS.
+        cfg.cflag("-DPATH_MAX=4096");
+        // core/thread.c includes <signal.h> outside its DISABLE_THREADING
+        // guard. The emulation define only unlocks the declarations —
+        // with the thread body compiled out nothing references a signal
+        // function, so there is no -lwasi-emulated-signal to link.
+        cfg.cflag("-D_WASI_EMULATED_SIGNAL");
+        // vfs.c demands SOME path-open backend even though everything we
+        // load goes through the in-memory Rust VFS. The stdio backend is
+        // the only one WASI can express; its vfs-file.c isn't in the
+        // platform source list (no WASI branch in CMakeLists), so it is
+        // compiled into the shim archive below instead.
+        cfg.cflag("-DENABLE_VFS_FILE");
+        // Drop the platform SIO drivers: dolphin.c is TCP-socket code
+        // WASI can't compile. That also drops sio/lockstep.c — which the
+        // whole rollback stack DOES need — so lockstep.c is compiled
+        // into the shim archive below, with the exact same defines.
+        cfg.define("MINIMAL_CORE", "ON");
     }
 
     let mgba_dst = cfg.build();
@@ -99,17 +167,65 @@ fn main() {
         println!("cargo:rustc-link-search=native={}/{}", build_dir.display(), config);
     }
     println!("cargo:rustc-link-lib=static=mgba");
-    match target_os.as_str() {
-        "macos" => {
-            println!("cargo:rustc-link-lib=framework=Cocoa");
+
+    let flags = extract_c_defines(&build_dir).expect("could not extract C_DEFINES from cmake build");
+
+    if wasm {
+        let sdk = wasi_sdk();
+        // The shim archive: syscall shims, plus the two C files the
+        // platform source lists leave out under WASI (the stdio VFS
+        // backend and the lockstep SIO driver). Compiled with the SAME
+        // defines cmake fed the core objects, so struct layouts agree.
+        // Its symbols must resolve BEFORE wasi-libc so the libc objects
+        // that import wasi_snapshot_preview1 are never pulled in.
+        let mut shim = cc::Build::new();
+        shim.compiler(sdk.join("bin").join("clang"))
+            .target("wasm32-wasip1")
+            .flag(format!("--sysroot={}", sdk.join("share").join("wasi-sysroot").display()))
+            .include("mgba/include")
+            .include(build_dir.join("include"))
+            .define("_GNU_SOURCE", None)
+            .define("PATH_MAX", "4096")
+            .define("_WASI_EMULATED_SIGNAL", None)
+            .define("DISABLE_THREADING", None)
+            .define("NDEBUG", None)
+            .define("ENABLE_VFS_FILE", None);
+        for def in FORCED_DEFINES {
+            shim.define(def, None);
         }
-        "windows" => {
-            println!("cargo:rustc-link-lib=shlwapi");
-            println!("cargo:rustc-link-lib=ole32");
-            println!("cargo:rustc-link-lib=uuid");
+        for flag in &flags {
+            shim.flag(flag);
         }
-        "linux" => {}
-        tos => panic!("unknown target os {:?}!", tos),
+        shim.file("shim.c")
+            .file("mgba/src/util/vfs/vfs-file.c")
+            .file("mgba/src/gba/sio/lockstep.c")
+            .compile("mgba_wasm_shim");
+        println!(
+            "cargo:rustc-link-search=native={}",
+            sdk.join("share").join("wasi-sysroot").join("lib").join("wasm32-wasip1").display()
+        );
+        println!("cargo:rustc-link-lib=static=c");
+        // Compiler builtins for the C objects (i64/i128/float helpers
+        // Rust's own compiler-builtins may not export).
+        if let Some(dir) = wasm32_builtins_dir(&sdk) {
+            println!("cargo:rustc-link-search=native={}", dir.display());
+            println!("cargo:rustc-link-lib=static=clang_rt.builtins-wasm32");
+        }
+        println!("cargo:rerun-if-changed=shim.c");
+        println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
+    } else {
+        match target_os.as_str() {
+            "macos" => {
+                println!("cargo:rustc-link-lib=framework=Cocoa");
+            }
+            "windows" => {
+                println!("cargo:rustc-link-lib=shlwapi");
+                println!("cargo:rustc-link-lib=ole32");
+                println!("cargo:rustc-link-lib=uuid");
+            }
+            "linux" => {}
+            tos => panic!("unknown target os {:?}!", tos),
+        }
     }
     println!("cargo:rerun-if-changed=wrapper.h");
     // We emit explicit rerun-if-changed directives, which override cargo's
@@ -117,10 +233,22 @@ fn main() {
     // or edits to FORCED_DEFINES (e.g. toggling COLOR_16_BIT) won't take effect.
     println!("cargo:rerun-if-changed=build.rs");
 
-    let build_dir = mgba_dst.join("build");
-    let flags = extract_c_defines(&build_dir).expect("could not extract C_DEFINES from cmake build");
-
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default();
+    if wasm {
+        // Parse the headers exactly as the wasi compile saw them: ILP32
+        // layouts and wasi-libc's headers, not the host's. Needs a
+        // wasm-aware libclang (e.g. LIBCLANG_PATH=$(brew --prefix llvm)/lib).
+        let sdk = wasi_sdk();
+        builder = builder.clang_args([
+            "--target=wasm32-wasip1".to_string(),
+            format!("--sysroot={}", sdk.join("share").join("wasi-sysroot").display()),
+            // clang defaults wasm symbols to hidden visibility, and
+            // bindgen silently drops every function it considers
+            // non-linkable — this restores them.
+            "-fvisibility=default".to_string(),
+        ]);
+    }
+    let bindings = builder
         .header("wrapper.h")
         .blocklist_item("FP_INFINITE")
         .blocklist_item("FP_NAN")
@@ -143,4 +271,21 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+
+    if wasm {
+        // wasi-libc's stdio.h #undefs and redefines the SEEK_* whence
+        // macros (they also live in unistd.h), and bindgen drops macros
+        // that were ever #undef'd. The values are fixed by POSIX and by
+        // the native bindings; append them verbatim.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(out_path.join("bindings.rs"))
+            .expect("bindings.rs vanished");
+        writeln!(
+            f,
+            "pub const SEEK_SET: u32 = 0;\npub const SEEK_CUR: u32 = 1;\npub const SEEK_END: u32 = 2;"
+        )
+        .expect("couldn't append SEEK_* constants");
+    }
 }
