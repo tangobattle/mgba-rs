@@ -77,6 +77,16 @@ fn extract_from_vcxproj(path: &Path) -> Option<Vec<String>> {
 /// across the FFI boundary and the video buffer is silently misinterpreted.
 const FORCED_DEFINES: &[&str] = &["COLOR_16_BIT"];
 
+/// Extra defines forced onto wasm32 builds only, with the same
+/// both-sides-of-the-FFI discipline as [`FORCED_DEFINES`].
+///
+/// `MINIMAL_CORE=2` is the libretro configuration: it drops the
+/// frontend input map, video logging, and the proxy renderer from the
+/// core (including from `struct mCore`'s layout — hence bindgen must
+/// see it too). Their sources aren't in the wasm build, so without
+/// this the references become dangling `env.*` wasm imports.
+const WASM_FORCED_DEFINES: &[&str] = &["MINIMAL_CORE=2"];
+
 /// Locate the wasi-sdk root: `WASI_SDK_PATH`, required for wasm32 builds.
 fn wasi_sdk() -> PathBuf {
     PathBuf::from(
@@ -152,6 +162,9 @@ fn main() {
         // whole rollback stack DOES need — so lockstep.c is compiled
         // into the shim archive below, with the exact same defines.
         cfg.define("MINIMAL_CORE", "ON");
+        for def in WASM_FORCED_DEFINES {
+            cfg.cflag(format!("-D{def}"));
+        }
     }
 
     let mgba_dst = cfg.build();
@@ -193,10 +206,14 @@ fn main() {
         for def in FORCED_DEFINES {
             shim.define(def, None);
         }
+        for def in WASM_FORCED_DEFINES {
+            shim.flag(format!("-D{def}"));
+        }
         for flag in &flags {
             shim.flag(flag);
         }
         shim.file("shim.c")
+            .file("wasi-stubs.c")
             .file("mgba/src/util/vfs/vfs-file.c")
             .file("mgba/src/gba/sio/lockstep.c")
             .compile("mgba_wasm_shim");
@@ -212,6 +229,7 @@ fn main() {
             println!("cargo:rustc-link-lib=static=clang_rt.builtins-wasm32");
         }
         println!("cargo:rerun-if-changed=shim.c");
+        println!("cargo:rerun-if-changed=wasi-stubs.c");
         println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
     } else {
         match target_os.as_str() {
@@ -247,6 +265,7 @@ fn main() {
             // non-linkable — this restores them.
             "-fvisibility=default".to_string(),
         ]);
+        builder = builder.clang_args(WASM_FORCED_DEFINES.iter().map(|def| format!("-D{def}")));
     }
     let bindings = builder
         .header("wrapper.h")

@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <sys/time.h>
 #include <time.h>
+#include <wasi/api.h>
 
 // Provided by the Rust side of the module (js_sys::Date::now()).
 extern double gbaroll_now_unix_ms(void);
@@ -82,4 +83,49 @@ int getentropy(void *buffer, size_t len) {
         p[i] = 0;
     }
     return 0;
+}
+
+// The syscall floor: wasi-libc's implementations of the __wasi_*
+// functions are thin wrappers over wasi_snapshot_preview1 imports, all
+// living in ONE archive member (__wasilibc_real.o) — so referencing any
+// single one pulls every import along. shim.c + wasi-stubs.c (generated,
+// see tools/gen-wasi-stubs.py) together define the complete set, keeping
+// that object out of the link entirely: any libc path that still reaches
+// for a syscall gets a well-defined answer instead of the module growing
+// a WASI import. The behavior-bearing ones live here; the pure
+// "not supported" remainder is generated.
+
+__wasi_errno_t __wasi_environ_get(uint8_t **environ_ptrs, uint8_t *environ_buf) {
+    (void)environ_ptrs;
+    (void)environ_buf;
+    return 0;
+}
+
+__wasi_errno_t __wasi_environ_sizes_get(__wasi_size_t *count, __wasi_size_t *buf_size) {
+    *count = 0;
+    *buf_size = 0;
+    return 0;
+}
+
+// BADF is the "no more preopens" sentinel that ends libc's preopen scan.
+__wasi_errno_t __wasi_fd_prestat_get(__wasi_fd_t fd, __wasi_prestat_t *prestat) {
+    (void)fd;
+    (void)prestat;
+    return __WASI_ERRNO_BADF;
+}
+
+__wasi_errno_t __wasi_random_get(uint8_t *buf, __wasi_size_t buf_len) {
+    for (__wasi_size_t i = 0; i < buf_len; i++) {
+        buf[i] = 0;
+    }
+    return 0;
+}
+
+__wasi_errno_t __wasi_sched_yield(void) {
+    return 0;
+}
+
+_Noreturn void __wasi_proc_exit(__wasi_exitcode_t code) {
+    (void)code;
+    __builtin_trap();
 }
