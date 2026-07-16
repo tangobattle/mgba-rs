@@ -104,11 +104,10 @@ impl Logger {
     }
 }
 
-/// Install a process-global default logger so any mgba `Core` not driven
-/// through `mgba::thread::Thread` (e.g. the prefetch worker's bare core)
-/// still routes log lines through the Rust `log` facade instead of
-/// falling back to mgba's `printf` stub (which prints unprefixed lines
-/// like `GBA BIOS: SWI: 0B r0: …` straight to stdout).
+/// Install a process-global default logger so every mgba `Core` routes
+/// log lines through the Rust `log` facade instead of falling back to
+/// mgba's `printf` stub (which prints unprefixed lines like
+/// `GBA BIOS: SWI: 0B r0: …` straight to stdout).
 ///
 /// First call leaks a [`Logger`] and registers it; subsequent calls
 /// just re-register the same one. Safe to call from any thread and

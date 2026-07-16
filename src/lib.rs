@@ -7,7 +7,6 @@ pub mod log;
 pub mod sio;
 pub mod state;
 pub mod sync;
-pub mod thread;
 pub mod timing;
 // Private on purpose: a trapper splices itself into its core's CPU
 // component table with no uninstall, and core deinit walks that table —
