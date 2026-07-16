@@ -10,5 +10,6 @@ libz-sys = { version = "1.1.0", default-features = false, features = ["libc"] }
 
 [build-dependencies]
 bindgen = "0.72"
+cc = "1"
 cmake = "0.1"
 shell-words = "1.1"
