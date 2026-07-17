@@ -1,12 +1,11 @@
+/// A core's `mTiming`, viewed in place: a `#[repr(transparent)]` wrapper
+/// only ever handed out as `&Timing` borrowed from a
+/// [`Gba`](crate::gba::Gba).
 #[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct TimingRef<'a> {
-    pub(super) ptr: *const mgba_sys::mTiming,
-    pub(super) _lifetime: std::marker::PhantomData<&'a ()>,
-}
+pub struct Timing(pub(super) mgba_sys::mTiming);
 
-impl<'a> TimingRef<'a> {
+impl Timing {
     pub fn current_time(&self) -> i32 {
-        unsafe { mgba_sys::mTimingCurrentTime(self.ptr) }
+        unsafe { mgba_sys::mTimingCurrentTime(&self.0) }
     }
 }

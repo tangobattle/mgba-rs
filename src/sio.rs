@@ -125,17 +125,17 @@ impl Driver {
     /// Install this driver as the core's link port. The player is registered
     /// with the coordinator immediately (and re-registered on every core
     /// reset).
-    pub fn install(&mut self, core: &mut core::CoreMutRef) {
+    pub fn install(&mut self, core: &mut core::Core) {
         unsafe {
-            mgba_sys::GBASIOSetDriver(&mut (*core.gba_mut().ptr).sio, &mut self.raw.d);
+            mgba_sys::GBASIOSetDriver(&mut (*core.gba_mut().as_raw()).sio, &mut self.raw.d);
         }
     }
 
     /// Detach from the core's link port ahead of dropping this driver while
     /// the core lives on.
-    pub fn uninstall(&mut self, core: &mut core::CoreMutRef) {
+    pub fn uninstall(&mut self, core: &mut core::Core) {
         unsafe {
-            let sio = &mut (*core.gba_mut().ptr).sio;
+            let sio = &mut (*core.gba_mut().as_raw()).sio;
             if sio.driver == &mut self.raw.d as *mut _ {
                 mgba_sys::GBASIOSetDriver(sio, std::ptr::null_mut());
             }

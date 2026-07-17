@@ -1,17 +1,21 @@
+/// The GBA's ARM7TDMI, viewed in place: a `#[repr(transparent)]` wrapper
+/// over the C struct, only ever handed out as `&ArmCore` / `&mut ArmCore`
+/// borrowed from a [`Gba`](crate::gba::Gba).
 #[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct ARMCoreRef<'a> {
-    pub(super) ptr: *const mgba_sys::ARMCore,
-    pub(super) _lifetime: std::marker::PhantomData<&'a ()>,
+pub struct ArmCore(pub(super) mgba_sys::ARMCore);
+
+pub enum ExecutionMode {
+    ARM,
+    Thumb,
 }
 
-impl<'a> ARMCoreRef<'a> {
+impl ArmCore {
     pub fn gpr(&self, r: usize) -> i32 {
-        unsafe { (*self.ptr).__bindgen_anon_1.__bindgen_anon_1.gprs[r] }
+        unsafe { self.0.__bindgen_anon_1.__bindgen_anon_1.gprs[r] }
     }
 
     pub fn cpsr(&self) -> i32 {
-        unsafe { (*self.ptr).__bindgen_anon_1.__bindgen_anon_1.cpsr.packed }
+        unsafe { self.0.__bindgen_anon_1.__bindgen_anon_1.cpsr.packed }
     }
 
     pub fn thumb_pc(&self) -> u32 {
@@ -23,80 +27,45 @@ impl<'a> ARMCoreRef<'a> {
     }
 
     pub fn execution_mode(&self) -> ExecutionMode {
+        match self.0.executionMode {
+            mgba_sys::ExecutionMode_MODE_ARM => ExecutionMode::ARM,
+            mgba_sys::ExecutionMode_MODE_THUMB => ExecutionMode::Thumb,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn set_gpr(&mut self, r: usize, v: i32) {
         unsafe {
-            match (*self.ptr).executionMode {
-                mgba_sys::ExecutionMode_MODE_ARM => ExecutionMode::ARM,
-                mgba_sys::ExecutionMode_MODE_THUMB => ExecutionMode::Thumb,
-                _ => unreachable!(),
-            }
-        }
-    }
-}
-
-pub enum ExecutionMode {
-    ARM,
-    Thumb,
-}
-
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct ARMCoreMutRef<'a> {
-    pub(super) ptr: *mut mgba_sys::ARMCore,
-    pub(super) _lifetime: std::marker::PhantomData<&'a ()>,
-}
-
-impl<'a> ARMCoreMutRef<'a> {
-    pub fn as_ref(&self) -> ARMCoreRef<'_> {
-        ARMCoreRef {
-            ptr: self.ptr,
-            _lifetime: std::marker::PhantomData,
+            self.0.__bindgen_anon_1.__bindgen_anon_1.gprs[r] = v;
         }
     }
 
-    /// # Safety
-    ///
-    /// The underlying `ARMCore`'s `components` array must be allocated to
-    /// `CPU_COMPONENT_MAX` entries (mgba does this when the core is
-    /// initialized) and must not be freed or reallocated while the
-    /// returned slice is alive.
-    pub unsafe fn components_mut(&self) -> &[*mut mgba_sys::mCPUComponent] {
-        std::slice::from_raw_parts_mut(
-            (*self.ptr).components,
-            mgba_sys::mCPUComponentType_CPU_COMPONENT_MAX as usize,
-        )
-    }
-
-    pub fn set_gpr(&self, r: usize, v: i32) {
-        unsafe {
-            (*self.ptr).__bindgen_anon_1.__bindgen_anon_1.gprs[r] = v;
-        }
-    }
-
-    pub fn set_thumb_pc(&self, v: u32) {
+    pub fn set_thumb_pc(&mut self, v: u32) {
         self.set_gpr(15, v as i32);
         self.thumb_write_pc();
     }
 
-    fn thumb_write_pc(&self) {
+    fn thumb_write_pc(&mut self) {
+        let cpu: *mut mgba_sys::ARMCore = &mut self.0;
         unsafe {
             // uint32_t pc = cpu->gprs[ARM_PC] & -WORD_SIZE_THUMB;
-            let mut pc =
-                (self.as_ref().gpr(mgba_sys::ARM_PC as usize) & -(mgba_sys::WordSize_WORD_SIZE_THUMB as i32)) as u32;
+            let mut pc = (self.gpr(mgba_sys::ARM_PC as usize)
+                & -(mgba_sys::WordSize_WORD_SIZE_THUMB as i32)) as u32;
 
             // cpu->memory.setActiveRegion(cpu, pc);
-            (*self.ptr).memory.setActiveRegion.unwrap()(self.ptr, pc);
+            (*cpu).memory.setActiveRegion.unwrap()(cpu, pc);
 
             // LOAD_16(cpu->prefetch[0], pc & cpu->memory.activeMask, cpu->memory.activeRegion);
-            (*self.ptr).prefetch[0] = *(((*self.ptr).memory.activeRegion as *const u8)
-                .add((pc & (*self.ptr).memory.activeMask) as usize)
+            (*cpu).prefetch[0] = *(((*cpu).memory.activeRegion as *const u8)
+                .add((pc & (*cpu).memory.activeMask) as usize)
                 as *const u16) as u32;
 
             // pc += WORD_SIZE_THUMB;
             pc += mgba_sys::WordSize_WORD_SIZE_THUMB as u32;
 
             // LOAD_16(cpu->prefetch[1], pc & cpu->memory.activeMask, cpu->memory.activeRegion);
-            (*self.ptr).prefetch[1] = *(((*self.ptr).memory.activeRegion as *const u8)
-                .add((pc & (*self.ptr).memory.activeMask) as usize)
+            (*cpu).prefetch[1] = *(((*cpu).memory.activeRegion as *const u8)
+                .add((pc & (*cpu).memory.activeMask) as usize)
                 as *const u16) as u32;
 
             // cpu->gprs[ARM_PC] = pc;

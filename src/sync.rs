@@ -1,35 +1,16 @@
+/// A core's `mCoreSync`, viewed in place: a `#[repr(transparent)]`
+/// wrapper only ever handed out as `&Sync` / `&mut Sync` borrowed from a
+/// [`Gba`](crate::gba::Gba).
 #[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct SyncRef<'a> {
-    pub(super) ptr: *const mgba_sys::mCoreSync,
-    pub(super) _lifetime: std::marker::PhantomData<&'a ()>,
-}
+pub struct Sync(pub(super) mgba_sys::mCoreSync);
 
-impl<'a> SyncRef<'a> {
+impl Sync {
     pub fn fps_target(&self) -> f32 {
-        unsafe { (*self.ptr).fpsTarget }
-    }
-}
-
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct SyncMutRef<'a> {
-    pub(super) ptr: *mut mgba_sys::mCoreSync,
-    pub(super) _lifetime: std::marker::PhantomData<&'a ()>,
-}
-
-impl<'a> SyncMutRef<'a> {
-    pub fn as_ref(&self) -> SyncRef<'_> {
-        SyncRef {
-            ptr: self.ptr,
-            _lifetime: std::marker::PhantomData,
-        }
+        self.0.fpsTarget
     }
 
     pub fn set_fps_target(&mut self, fps_target: f32) {
-        unsafe {
-            (*self.ptr).fpsTarget = fps_target;
-        }
+        self.0.fpsTarget = fps_target;
     }
 
     // mCoreSyncLoadCoreOpts pins audioHighWater at 512 frames, sized for the
@@ -40,8 +21,6 @@ impl<'a> SyncMutRef<'a> {
     // throttles below realtime (audible as low-pitched playback + underrun
     // crunch). Tango rescales this per fill mirroring mGBA's SDL frontend.
     pub fn set_audio_high_water(&mut self, frames: u32) {
-        unsafe {
-            (*self.ptr).audioHighWater = frames as _;
-        }
+        self.0.audioHighWater = frames as _;
     }
 }

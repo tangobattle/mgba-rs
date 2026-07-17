@@ -5,64 +5,31 @@ use super::timing;
 pub const SCREEN_WIDTH: u32 = mgba_sys::GBA_VIDEO_HORIZONTAL_PIXELS as u32;
 pub const SCREEN_HEIGHT: u32 = mgba_sys::GBA_VIDEO_VERTICAL_PIXELS as u32;
 
+/// The GBA board, viewed in place: a `#[repr(transparent)]` wrapper over
+/// the C struct, only ever handed out as `&Gba` / `&mut Gba` borrowed
+/// from a [`Core`](crate::core::Core).
 #[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct GBARef<'a> {
-    pub(super) ptr: *const mgba_sys::GBA,
-    pub(super) _lifetime: std::marker::PhantomData<&'a ()>,
-}
+pub struct Gba(pub(super) mgba_sys::GBA);
 
-impl<'a> GBARef<'a> {
-    pub fn cpu(&self) -> arm_core::ARMCoreRef<'a> {
-        arm_core::ARMCoreRef {
-            ptr: unsafe { (*self.ptr).cpu },
-            _lifetime: std::marker::PhantomData,
-        }
+impl Gba {
+    pub fn cpu(&self) -> &arm_core::ArmCore {
+        unsafe { &*(self.0.cpu as *const arm_core::ArmCore) }
     }
 
-    pub fn timing(&self) -> timing::TimingRef<'_> {
-        timing::TimingRef {
-            ptr: unsafe { &(*self.ptr).timing },
-            _lifetime: std::marker::PhantomData,
-        }
+    pub fn cpu_mut(&mut self) -> &mut arm_core::ArmCore {
+        unsafe { &mut *(self.0.cpu as *mut arm_core::ArmCore) }
+    }
+
+    pub fn timing(&self) -> &timing::Timing {
+        unsafe { &*(&self.0.timing as *const _ as *const timing::Timing) }
     }
 
     pub fn master_volume(&self) -> i32 {
-        unsafe { (*self.ptr).audio.masterVolume }
+        self.0.audio.masterVolume
     }
 
-    pub fn sync(&self) -> Option<sync::SyncRef<'_>> {
-        let sync_ptr = unsafe { (*self.ptr).sync };
-        if sync_ptr.is_null() {
-            None
-        } else {
-            Some(sync::SyncRef {
-                ptr: sync_ptr,
-                _lifetime: std::marker::PhantomData,
-            })
-        }
-    }
-}
-
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct GBAMutRef<'a> {
-    pub(super) ptr: *mut mgba_sys::GBA,
-    pub(super) _lifetime: std::marker::PhantomData<&'a ()>,
-}
-
-impl<'a> GBAMutRef<'a> {
-    pub fn as_ref(&self) -> GBARef<'_> {
-        GBARef {
-            ptr: self.ptr,
-            _lifetime: std::marker::PhantomData,
-        }
-    }
-
-    pub fn set_master_volume(&self, volume: i32) {
-        unsafe {
-            (*self.ptr).audio.masterVolume = volume;
-        }
+    pub fn set_master_volume(&mut self, volume: i32) {
+        self.0.audio.masterVolume = volume;
     }
 
     /// Set the video frameskip. A large value makes the GBA video module skip
@@ -73,29 +40,32 @@ impl<'a> GBAMutRef<'a> {
     /// states they capture, and VRAM/IO are driven by the CPU, not the renderer.
     /// `frameskip` isn't part of the serialized state, so loading a save state
     /// (e.g. one captured on a rendering core) won't clear it.
-    pub fn set_frameskip(&self, frameskip: i32) {
-        unsafe {
-            (*self.ptr).video.frameskip = frameskip;
-            (*self.ptr).video.frameskipCounter = frameskip;
-        }
+    pub fn set_frameskip(&mut self, frameskip: i32) {
+        self.0.video.frameskip = frameskip;
+        self.0.video.frameskipCounter = frameskip;
     }
 
-    pub fn cpu_mut(&self) -> arm_core::ARMCoreMutRef<'a> {
-        arm_core::ARMCoreMutRef {
-            ptr: unsafe { (*self.ptr).cpu },
-            _lifetime: std::marker::PhantomData,
-        }
-    }
-
-    pub fn sync_mut(&mut self) -> Option<sync::SyncMutRef<'_>> {
-        let sync_ptr = unsafe { (*self.ptr).sync };
+    pub fn sync(&self) -> Option<&sync::Sync> {
+        let sync_ptr = self.0.sync;
         if sync_ptr.is_null() {
             None
         } else {
-            Some(sync::SyncMutRef {
-                ptr: sync_ptr,
-                _lifetime: std::marker::PhantomData,
-            })
+            Some(unsafe { &*(sync_ptr as *const sync::Sync) })
         }
+    }
+
+    pub fn sync_mut(&mut self) -> Option<&mut sync::Sync> {
+        let sync_ptr = self.0.sync;
+        if sync_ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *(sync_ptr as *mut sync::Sync) })
+        }
+    }
+
+    /// The raw C struct, for state surgery the bindings don't cover
+    /// (mgba-siolink's snapshot side-channels).
+    pub fn as_raw(&mut self) -> *mut mgba_sys::GBA {
+        &mut self.0
     }
 }
