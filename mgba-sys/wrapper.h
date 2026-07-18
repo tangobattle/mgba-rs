@@ -11,4 +11,5 @@
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/serialize.h>
 #include <mgba/internal/gba/sio/lockstep.h>
+#include <mgba/internal/gba/sio/wireless.h>
 #include <stdlib.h>

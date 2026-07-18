@@ -177,3 +177,169 @@ impl Driver {
         }
     }
 }
+
+pub mod wireless {
+    //! Bindings for the wireless adapter (AGB-015 "RFU") stack.
+    //!
+    //! Same cooperative single-thread model and lifecycle contract as the
+    //! cable lockstep above: each core gets a `Driver` (its own emulated
+    //! adapter), every driver attaches to one `Coordinator` (the airwaves),
+    //! and the C side parks caught-up cores through `mLockstepUser`
+    //! sleep/wake so one thread can drive the whole link deterministically.
+    //! Unlike the cable, a SOLO core still wants a driver: a wireless game
+    //! running alone talks to its adapter (login, broadcast, scan) even
+    //! with nobody else on the airwaves.
+
+    use super::super::core;
+    use super::{c_player_id_changed, c_requested_id, c_sleep, c_wake, UserGlue};
+
+    pub struct Coordinator {
+        raw: Box<mgba_sys::GBASIOWirelessCoordinator>,
+    }
+
+    // Only touched from whichever thread is currently driving the attached
+    // cores (all C entry points take its internal mutex anyway).
+    unsafe impl Send for Coordinator {}
+
+    impl Coordinator {
+        pub fn new() -> Self {
+            let mut raw = Box::new(unsafe { std::mem::zeroed::<mgba_sys::GBASIOWirelessCoordinator>() });
+            unsafe {
+                mgba_sys::GBASIOWirelessCoordinatorInit(&mut *raw);
+            }
+            Coordinator { raw }
+        }
+
+        /// Number of players currently registered (attached drivers whose
+        /// cores have been reset at least once).
+        pub fn attached_players(&mut self) -> usize {
+            unsafe { mgba_sys::GBASIOWirelessCoordinatorAttached(&mut *self.raw) }
+        }
+    }
+
+    impl Default for Coordinator {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Drop for Coordinator {
+        fn drop(&mut self) {
+            unsafe {
+                mgba_sys::GBASIOWirelessCoordinatorDeinit(&mut *self.raw);
+            }
+        }
+    }
+
+    pub struct Driver {
+        raw: Box<mgba_sys::GBASIOWirelessDriver>,
+        glue: Box<UserGlue>,
+    }
+
+    unsafe impl Send for Driver {}
+
+    impl Driver {
+        /// `requested_id` is the player slot this core asks for when IDs
+        /// are (re)assigned; distinct per driver for cross-process
+        /// determinism, exactly as with the cable lockstep.
+        pub fn new(coordinator: &mut Coordinator, requested_id: i32) -> Self {
+            let mut glue = Box::new(UserGlue {
+                user: mgba_sys::mLockstepUser {
+                    sleep: Some(c_sleep),
+                    wake: Some(c_wake),
+                    requestedId: Some(c_requested_id),
+                    playerIdChanged: Some(c_player_id_changed),
+                },
+                asleep: std::sync::atomic::AtomicBool::new(false),
+                requested_id,
+                player_id: std::sync::atomic::AtomicI32::new(-1),
+            });
+            let mut raw = Box::new(unsafe { std::mem::zeroed::<mgba_sys::GBASIOWirelessDriver>() });
+            unsafe {
+                mgba_sys::GBASIOWirelessDriverCreate(&mut *raw, &mut glue.user);
+                mgba_sys::GBASIOWirelessCoordinatorAttach(&mut *coordinator.raw, &mut *raw);
+            }
+            Driver { raw, glue }
+        }
+
+        /// Install this driver as the core's link port: the adapter plugs
+        /// in. The player registers with the coordinator immediately (and
+        /// re-registers on every core reset).
+        pub fn install(&mut self, core: &mut core::Core) {
+            unsafe {
+                mgba_sys::GBASIOSetDriver(&mut (*core.gba_mut().as_raw()).sio, &mut self.raw.d);
+            }
+        }
+
+        /// Detach from the core's link port ahead of dropping this driver
+        /// while the core lives on.
+        pub fn uninstall(&mut self, core: &mut core::Core) {
+            unsafe {
+                let sio = &mut (*core.gba_mut().as_raw()).sio;
+                if sio.driver == &mut self.raw.d as *mut _ {
+                    mgba_sys::GBASIOSetDriver(sio, std::ptr::null_mut());
+                }
+            }
+        }
+
+        /// Whether the RF-tick barrier has parked this core.
+        pub fn asleep(&self) -> bool {
+            self.glue.asleep.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// The player ID assigned by the coordinator (0 = clock owner), or
+        /// -1 before the first assignment.
+        pub fn player_id(&self) -> i32 {
+            self.glue.player_id.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// Serialize this player's adapter + sync state (for player 0,
+        /// including the shared coordinator state). Core savestates do NOT
+        /// cover any of this; snapshot both alongside each core's state.
+        pub fn save_state(&mut self) -> Vec<u8> {
+            let mut buf: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let mut size: usize = 0;
+            unsafe {
+                (self.raw.d.saveState.unwrap())(&mut self.raw.d, &mut buf, &mut size);
+                let v = std::slice::from_raw_parts(buf as *const u8, size).to_vec();
+                mgba_sys::free(buf);
+                v
+            }
+        }
+
+        /// Restore this player's adapter + sync state. Call after the
+        /// owning core's `load_state`.
+        pub fn load_state(&mut self, state: &[u8]) -> bool {
+            unsafe {
+                (self.raw.d.loadState.unwrap())(&mut self.raw.d, state.as_ptr() as *const _, state.len())
+            }
+        }
+
+        /// Serialize just the game-visible adapter state — the login,
+        /// role, broadcast, mailbox and wait machinery, WITHOUT any
+        /// link/sync bookkeeping. This is what a boot capture carries so
+        /// a link rebuilt mid-session resumes every adapter where it
+        /// was: the players walk into RF range with their sessions
+        /// intact.
+        pub fn save_adapter_state(&mut self) -> Vec<u8> {
+            let mut buf: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let mut size: usize = 0;
+            unsafe {
+                mgba_sys::GBASIOWirelessDriverSaveAdapterState(&mut *self.raw, &mut buf, &mut size);
+                let v = std::slice::from_raw_parts(buf as *const u8, size).to_vec();
+                mgba_sys::free(buf);
+                v
+            }
+        }
+
+        /// Restore a [`save_adapter_state`](Self::save_adapter_state)
+        /// blob into this player's adapter. Call after `install` (the
+        /// attach powers the adapter on fresh; this puts its session
+        /// back).
+        pub fn load_adapter_state(&mut self, state: &[u8]) -> bool {
+            unsafe {
+                mgba_sys::GBASIOWirelessDriverLoadAdapterState(&mut *self.raw, state.as_ptr() as *const _, state.len())
+            }
+        }
+    }
+}

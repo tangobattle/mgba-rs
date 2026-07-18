@@ -175,25 +175,29 @@ fn main() {
     let build_dir = mgba_dst.join("build");
     let flags = extract_c_defines(&build_dir).expect("could not extract C_DEFINES from cmake build");
 
-    // MINIMAL_CORE drops gba/sio/lockstep.c from the cmake source list (it
-    // rides in the same list as the Dolphin driver), but the lockstep driver
-    // is exactly the piece the rollback stack drives the cores through.
-    // Compile it back in with the same defines cmake fed the core objects so
-    // struct layouts agree. Emitted before libmgba so single-pass linkers
-    // resolve its references into the core archive. On wasm it rides the
-    // shim archive below instead — same idea, wasi compiler.
+    // MINIMAL_CORE drops the gba/sio driver sources from the cmake source
+    // list (they ride in the same list as the Dolphin driver), but the
+    // lockstep and wireless drivers are exactly the pieces the rollback
+    // stack drives the cores through. Compile them back in with the same
+    // defines cmake fed the core objects so struct layouts agree. Emitted
+    // before libmgba so single-pass linkers resolve their references into
+    // the core archive. On wasm they ride the shim archive below instead —
+    // same idea, wasi compiler.
     if !wasm {
-        let mut lockstep = cc::Build::new();
-        lockstep.include("mgba/include").include(build_dir.join("include"));
+        let mut sio = cc::Build::new();
+        sio.include("mgba/include").include(build_dir.join("include"));
         for def in FORCED_DEFINES {
-            lockstep.flag(format!("-D{def}"));
+            sio.flag(format!("-D{def}"));
         }
         for flag in &flags {
-            lockstep.flag(flag);
+            sio.flag(flag);
         }
-        lockstep.file("mgba/src/gba/sio/lockstep.c").compile("mgba_lockstep");
+        sio.file("mgba/src/gba/sio/lockstep.c")
+            .file("mgba/src/gba/sio/wireless.c")
+            .compile("mgba_sio");
     }
     println!("cargo:rerun-if-changed=mgba/src/gba/sio/lockstep.c");
+    println!("cargo:rerun-if-changed=mgba/src/gba/sio/wireless.c");
 
     // Makefile generators (NMake / Unix / MinGW) output directly under
     // `build/`; the Visual Studio generator buries artifacts in a
@@ -235,6 +239,7 @@ fn main() {
             .file("wasi-stubs.c")
             .file("mgba/src/util/vfs/vfs-file.c")
             .file("mgba/src/gba/sio/lockstep.c")
+            .file("mgba/src/gba/sio/wireless.c")
             .compile("mgba_wasm_shim");
         println!(
             "cargo:rustc-link-search=native={}",
