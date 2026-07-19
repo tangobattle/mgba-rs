@@ -231,6 +231,20 @@ pub mod wireless {
         }
     }
 
+    /// The player id recorded in a [`Driver::save_adapter_state`] blob,
+    /// or `None` if the blob predates ids (version 1) or is invalid.
+    /// Feed it back as the driver's `requested_id` when rebuilding a
+    /// link from captures: the id is the adapter's airwaves identity
+    /// (the device id and every connection reference key off it), so
+    /// handing it back is what lets surviving connections hold across
+    /// the rebuild.
+    pub fn adapter_state_player_id(state: &[u8]) -> Option<i32> {
+        let id = unsafe {
+            mgba_sys::GBASIOWirelessAdapterStatePlayerId(state.as_ptr() as *const _, state.len())
+        };
+        (id >= 0).then_some(id)
+    }
+
     pub struct Driver {
         raw: Box<mgba_sys::GBASIOWirelessDriver>,
         glue: Box<UserGlue>,
@@ -239,9 +253,13 @@ pub mod wireless {
     unsafe impl Send for Driver {}
 
     impl Driver {
-        /// `requested_id` is the player slot this core asks for when IDs
-        /// are (re)assigned; distinct per driver for cross-process
-        /// determinism, exactly as with the cable lockstep.
+        /// `requested_id` is the seat this adapter asks for at attach:
+        /// it gets exactly that id if the seat is free, else the lowest
+        /// free one. `-1` means any. Ids are sticky once assigned —
+        /// membership changes never renumber a seated adapter — so pass
+        /// a capture's [`adapter_state_player_id`] when rebuilding a
+        /// link mid-session, and the adapter keeps its airwaves
+        /// identity.
         pub fn new(coordinator: &mut Coordinator, requested_id: i32) -> Self {
             let mut glue = Box::new(UserGlue {
                 user: mgba_sys::mLockstepUser {
