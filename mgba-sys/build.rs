@@ -186,6 +186,14 @@ fn main() {
     if !wasm {
         let mut sio = cc::Build::new();
         sio.include("mgba/include").include(build_dir.join("include"));
+        // "The same defines" isn't enough: cmake also feeds the core objects
+        // a C standard (CMAKE_C_STANDARD 11), and the flags extraction above
+        // only carries the -D set. MSVC's default C mode predates the
+        // file-scope static_assert these files use, so hand it /std:c11
+        // explicitly; gcc/clang defaults are already past c11.
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            sio.flag("-std:c11");
+        }
         for def in FORCED_DEFINES {
             sio.flag(format!("-D{def}"));
         }
