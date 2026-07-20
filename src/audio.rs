@@ -16,6 +16,14 @@ impl AudioBuffer {
         unsafe { mgba_sys::mAudioBufferRead(&mut self.0, samples.as_mut_ptr(), count) }
     }
 
+    pub fn write(&mut self, samples: &[i16], count: usize) -> usize {
+        unsafe { mgba_sys::mAudioBufferWrite(&mut self.0, samples.as_ptr(), count) }
+    }
+
+    pub fn channels(&self) -> u32 {
+        self.0.channels
+    }
+
     pub fn clear(&mut self) {
         unsafe { mgba_sys::mAudioBufferClear(&mut self.0) }
     }
