@@ -15,14 +15,14 @@
 #include <wasi/api.h>
 
 // Provided by the Rust side of the module (js_sys::Date::now()).
-extern double gbaroll_now_unix_ms(void);
+extern double mgba_sys_now_unix_ms(void);
 
 // mgba's one native clock read is gettimeofday() in core/serialize.c
 // (savestate metadata stamps).
 int gettimeofday(struct timeval *restrict tv, void *restrict tz) {
     (void)tz;
     if (tv) {
-        double ms = gbaroll_now_unix_ms();
+        double ms = mgba_sys_now_unix_ms();
         tv->tv_sec = (time_t)(ms / 1000.0);
         tv->tv_usec = (suseconds_t)((ms - (double)tv->tv_sec * 1000.0) * 1000.0);
     }
@@ -32,7 +32,7 @@ int gettimeofday(struct timeval *restrict tv, void *restrict tz) {
 int clock_gettime(clockid_t clock, struct timespec *ts) {
     (void)clock;
     if (ts) {
-        double ms = gbaroll_now_unix_ms();
+        double ms = mgba_sys_now_unix_ms();
         ts->tv_sec = (time_t)(ms / 1000.0);
         ts->tv_nsec = (long)((ms - (double)ts->tv_sec * 1000.0) * 1000000.0);
     }
@@ -40,7 +40,7 @@ int clock_gettime(clockid_t clock, struct timespec *ts) {
 }
 
 time_t time(time_t *out) {
-    time_t t = (time_t)(gbaroll_now_unix_ms() / 1000.0);
+    time_t t = (time_t)(mgba_sys_now_unix_ms() / 1000.0);
     if (out) {
         *out = t;
     }
